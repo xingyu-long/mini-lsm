@@ -318,16 +318,50 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        // grab the lock for PUT and add it into state
-        let guard = self.state.read();
-        guard.memtable.put(_key, _value)?;
+        let size;
+
+        // use {}, so that we will release the lock once its out of scope.
+        {
+            // grab the lock for PUT and add it into state
+            let guard = self.state.read();
+            guard.memtable.put(_key, _value)?;
+
+            // check if we need to force_freeze_memtable
+            size = guard.memtable.approximate_size();
+        }
+
+        self.try_freeze(size)?;
         Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        let guard = self.state.read();
-        guard.memtable.put(_key, b"")?;
+        let size;
+
+        {
+            let guard = self.state.read();
+            guard.memtable.put(_key, b"")?;
+
+            // check if we need to force_freeze_memtable
+            size = guard.memtable.approximate_size();
+        }
+
+        self.try_freeze(size)?;
+        Ok(())
+    }
+
+    fn try_freeze(&self, estimated_size: usize) -> Result<()> {
+        if estimated_size >= self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            // read it again from the CURRENT state
+            let guard = self.state.read();
+
+            if guard.memtable.approximate_size() >= self.options.target_sst_size {
+                // need to drop guard here explicitly
+                drop(guard);
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
         Ok(())
     }
 
@@ -353,7 +387,30 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let memtable_id = self.next_sst_id();
+        let memtable = Arc::new(MemTable::create(memtable_id));
+
+        let old_memtable;
+        {
+            // acquire the write lock
+            let mut guard = self.state.write();
+            let mut snapshot = guard.as_ref().clone();
+
+            // 1) old_memtable: snapshot.memtable
+            // 2) it also moves new memtable to snapshot.memtable
+            old_memtable = std::mem::replace(&mut snapshot.memtable, memtable);
+
+            // this shoud be similar with above replace call
+            // old_memtable = snapshot.memtable.clone();
+            // snapshot.memtable = memtable;
+
+            snapshot.imm_memtables.insert(0, old_memtable);
+
+            // TODO(xingyu): do we need to reset approximate_size???
+            // update the snapshot
+            *guard = Arc::new(snapshot)
+        }
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
