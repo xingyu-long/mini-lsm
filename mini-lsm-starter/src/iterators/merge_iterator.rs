@@ -100,11 +100,12 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     }
 
     fn is_valid(&self) -> bool {
-        self.current.as_ref().unwrap().1.is_valid()
-        // self.current
-        //     .as_ref()
-        //     .map(|x| x.1.is_valid())
-        //     .unwrap_or(false)
+        // self.current.as_ref().unwrap().1.is_valid()
+        // this handles the case where Option<X> was None
+        self.current
+            .as_ref()
+            .map(|x| x.1.is_valid())
+            .unwrap_or(false)
     }
 
     fn next(&mut self) -> Result<()> {
