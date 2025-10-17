@@ -19,7 +19,7 @@ mod builder;
 mod iterator;
 
 pub use builder::BlockBuilder;
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
 pub use iterator::BlockIterator;
 
 // 16 bits -> 2 bytes
@@ -35,11 +35,29 @@ impl Block {
     /// Encode the internal data to the data layout illustrated in the course
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
-        unimplemented!()
+        let mut buff = self.data.clone();
+        for offset in self.offsets.iter() {
+            buff.put_u16(*offset);
+        }
+        // this stands for how many key-value pairs are there.
+        buff.put_u16(self.offsets.len() as u16);
+        return Bytes::from(buff);
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(data: &[u8]) -> Self {
-        unimplemented!()
+        let num_elements = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
+        let data_end = data.len() - SIZEOF_U16 - num_elements * SIZEOF_U16;
+        let offsets_raw = &data[data_end..data.len() - SIZEOF_U16];
+        // get each offsets
+        let offsets: Vec<u16> = offsets_raw
+            .chunks(SIZEOF_U16)
+            .map(|mut x| x.get_u16())
+            .collect();
+
+        Self {
+            data: data[0..data_end].to_vec(),
+            offsets: offsets,
+        }
     }
 }
