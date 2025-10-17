@@ -33,6 +33,9 @@ impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
         let mut iter = Self { inner: iter };
         // skip DELETED values
+        // for the case, we had deletions at the beginning
+        // and didn't even trigger the next() to call move_to_non_delete.
+        // please refer 2nd test within test_task4_integration.
         iter.move_to_non_delete()?;
         Ok(iter)
     }
