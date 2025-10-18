@@ -66,7 +66,15 @@ impl BlockIterator {
 
     /// Creates a block iterator and seek to the first key that >= `key`.
     pub fn create_and_seek_to_key(block: Arc<Block>, key: KeySlice) -> Self {
-        unimplemented!()
+        let mut iter = Self {
+            block,
+            key: KeyVec::new(),
+            value_range: (0, 0),
+            idx: 0,
+            first_key: KeyVec::new(),
+        };
+        iter.seek_to_key(key);
+        iter
     }
 
     /// Returns the key of the current entry.
@@ -130,6 +138,36 @@ impl BlockIterator {
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
-        unimplemented!()
+        // use binary search to speed up since it's sorted.
+        let mut left = 0;
+        let mut right = self.block.offsets.len();
+
+        while left + 1 < right {
+            let mid = left + (right - left) / 2;
+            self.seek_to(mid);
+            if self.is_valid() {
+                if self.key() >= key {
+                    right = mid;
+                } else {
+                    left = mid;
+                }
+            }
+        }
+        // try the left first
+        self.seek_to(left);
+        if self.is_valid() && self.key() >= key {
+            return;
+        }
+        self.seek_to(right);
+        if self.is_valid() && self.key() >= key {
+            return;
+        }
+
+        // let mut index = 0;
+        // TOO SLOW!!!
+        // while self.key.is_empty() || self.key().cmp(&key) == std::cmp::Ordering::Less {
+        //     self.seek_to(index);
+        //     index += 1;
+        // }
     }
 }
