@@ -28,7 +28,7 @@ pub use builder::SsTableBuilder;
 use bytes::Buf;
 pub use iterator::SsTableIterator;
 
-use crate::block::Block;
+use crate::block::{Block, SIZEOF_U32};
 use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
 
@@ -148,7 +148,24 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        unimplemented!()
+        // read file and decode block_meta data
+        let file_len = file.size();
+        let raw_meta_offset = file.read(file.size() - SIZEOF_U32 as u64, SIZEOF_U32 as u64)?;
+        let meta_offset = (&raw_meta_offset[..]).get_u32();
+        // here is the len, it's not the end.
+        let raw_meta = file.read(meta_offset as u64, file_len - SIZEOF_U32 as u64 - meta_offset as u64)?;
+        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
+        Ok(SsTable {
+            id: id,
+            file: file,
+            block_meta_offset: meta_offset as usize,
+            first_key: block_meta.first().unwrap().first_key.clone(),
+            last_key: block_meta.last().unwrap().last_key.clone(),
+            block_meta: block_meta,
+            block_cache: block_cache,
+            bloom: None,
+            max_ts: 0,
+        })
     }
 
     /// Create a mock SST with only first key + last key metadata
