@@ -60,7 +60,6 @@ impl SsTableBuilder {
         if self.first_key.is_empty() {
             self.first_key.clear();
             self.first_key.extend(key.raw_ref());
-            println!("setting first key = {:?}", self.first_key);
         }
         if self.builder.add(key, value) {
             self.last_key.clear();
