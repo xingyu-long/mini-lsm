@@ -207,7 +207,17 @@ impl SsTable {
 
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        // need to handle if block_cache was None
+        if let Some(block_cache) = &self.block_cache {
+            let cache_key = (self.id, block_idx);
+            let block = block_cache
+                .clone()
+                .try_get_with(cache_key, || self.read_block(block_idx));
+            assert!(block.is_ok());
+            Ok(block.unwrap())
+        } else {
+            self.read_block(block_idx)
+        }
     }
 
     /// Find the block that may contain `key`.
