@@ -23,6 +23,7 @@ use std::sync::atomic::AtomicUsize;
 
 use anyhow::Result;
 use bytes::Bytes;
+use nom::AsBytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::block::Block;
@@ -302,9 +303,12 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        let guard = self.state.read();
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
 
-        if let Some(val) = guard.memtable.get(_key) {
+        if let Some(val) = snapshot.memtable.get(_key) {
             // deal with tomestone, i.e., b"" (empty case)
             if val.is_empty() {
                 return Ok(None);
@@ -313,12 +317,30 @@ impl LsmStorageInner {
         }
 
         // check the imm_memtables too
-        for imm_table in guard.imm_memtables.iter() {
+        for imm_table in snapshot.imm_memtables.iter() {
             if let Some(val) = imm_table.get(_key) {
                 if val.is_empty() {
                     return Ok(None);
                 }
                 return Ok(Some(val));
+            }
+        }
+
+        let mut sstable_iters = Vec::new();
+        // check the sstables
+        for sst_id in snapshot.l0_sstables.iter() {
+            let sstable = snapshot.sstables[sst_id].clone();
+            let iter =
+                SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(_key))?;
+            sstable_iters.push(Box::new(iter));
+        }
+
+        let mut table_iter = MergeIterator::create(sstable_iters);
+        while table_iter.is_valid() {
+            if table_iter.key() == KeySlice::from_slice(_key) && !table_iter.value().is_empty() {
+                return Ok(Some(Bytes::copy_from_slice(table_iter.value())));
+            } else {
+                table_iter.next()?;
             }
         }
 
