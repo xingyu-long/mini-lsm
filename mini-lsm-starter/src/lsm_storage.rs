@@ -309,6 +309,10 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
+    fn key_within(user_key: &[u8], table_lower: &[u8], table_upper: &[u8]) -> bool {
+        user_key >= table_lower && user_key <= table_upper
+    }
+
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
         let snapshot = {
@@ -338,9 +342,15 @@ impl LsmStorageInner {
         // check the sstables
         for sst_id in snapshot.l0_sstables.iter() {
             let sstable = snapshot.sstables[sst_id].clone();
-            let iter =
-                SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(_key))?;
-            sstable_iters.push(Box::new(iter));
+            if Self::key_within(
+                _key,
+                sstable.first_key().raw_ref(),
+                sstable.last_key().raw_ref(),
+            ) {
+                let iter =
+                    SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(_key))?;
+                sstable_iters.push(Box::new(iter));
+            }
         }
 
         // we don't need to walk through all items since we only care if the first key is _key
@@ -498,6 +508,36 @@ impl LsmStorageInner {
         Ok(())
     }
 
+    fn range_overlap(
+        user_lower: Bound<&[u8]>,
+        user_upper: Bound<&[u8]>,
+        table_lower: &[u8],
+        table_upper: &[u8],
+    ) -> bool {
+        // [table_lower, table_upper] [user_lower]
+        match user_lower {
+            Bound::Included(key) if key > table_upper => {
+                return false;
+            }
+            Bound::Excluded(key) if key >= table_upper => {
+                return false;
+            }
+            _ => {}
+        }
+
+        // [user_lower, user_upper] [table_lower]
+        match user_upper {
+            Bound::Included(key) if table_lower > key => {
+                return false;
+            }
+            Bound::Excluded(key) if table_lower >= key => {
+                return false;
+            }
+            _ => {}
+        }
+        true
+    }
+
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
@@ -520,25 +560,33 @@ impl LsmStorageInner {
         let mut sstables = Vec::with_capacity(snapshot.l0_sstables.len());
         for sst_id in snapshot.l0_sstables.iter() {
             let sstable = snapshot.sstables[sst_id].clone();
-            // ensure the _lower for the sstables;
-            let iter = match _lower {
-                Bound::Included(key) => {
-                    SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?
-                }
-                Bound::Excluded(key) => {
-                    let mut temp_iter = SsTableIterator::create_and_seek_to_key(
-                        sstable,
-                        KeySlice::from_slice(key),
-                    )?;
-
-                    if temp_iter.is_valid() && temp_iter.key() == KeySlice::from_slice(key) {
-                        temp_iter.next()?;
+            // rule out these impossible ranges
+            if Self::range_overlap(
+                _lower,
+                _upper,
+                sstable.first_key().raw_ref(),
+                sstable.last_key().raw_ref(),
+            ) {
+                // ensure the _lower for the sstables;
+                let iter = match _lower {
+                    Bound::Included(key) => {
+                        SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?
                     }
-                    temp_iter
-                }
-                Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sstable)?,
-            };
-            sstables.push(Box::new(iter));
+                    Bound::Excluded(key) => {
+                        let mut temp_iter = SsTableIterator::create_and_seek_to_key(
+                            sstable,
+                            KeySlice::from_slice(key),
+                        )?;
+
+                        if temp_iter.is_valid() && temp_iter.key() == KeySlice::from_slice(key) {
+                            temp_iter.next()?;
+                        }
+                        temp_iter
+                    }
+                    Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sstable)?,
+                };
+                sstables.push(Box::new(iter));
+            }
         }
 
         let memtable_iter = MergeIterator::create(all_iters);
