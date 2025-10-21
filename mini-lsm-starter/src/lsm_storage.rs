@@ -335,13 +335,10 @@ impl LsmStorageInner {
             sstable_iters.push(Box::new(iter));
         }
 
-        let mut table_iter = MergeIterator::create(sstable_iters);
-        while table_iter.is_valid() {
-            if table_iter.key() == KeySlice::from_slice(_key) && !table_iter.value().is_empty() {
-                return Ok(Some(Bytes::copy_from_slice(table_iter.value())));
-            } else {
-                table_iter.next()?;
-            }
+        // we don't need to walk through all items since we only care if the first key is _key
+        let iter = MergeIterator::create(sstable_iters);
+        if iter.is_valid() && iter.key() == KeySlice::from_slice(_key) && !iter.value().is_empty() {
+            return Ok(Some(Bytes::copy_from_slice(iter.value())));
         }
 
         Ok(None)
