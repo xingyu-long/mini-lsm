@@ -115,16 +115,23 @@ impl BlockIterator {
 
     // update the key and value accroding to the data entry
     fn seek_to_offset(&mut self, offset: usize) {
-        let key_len = (&self.block.data[offset..offset + SIZEOF_U16]).get_u16() as usize;
-        let key_start_index = offset + SIZEOF_U16;
-        let key =
-            KeySlice::from_slice(&self.block.data[key_start_index..key_start_index + key_len]);
-        let value_len = (&self.block.data
-            [key_start_index + key_len..key_start_index + key_len + SIZEOF_U16])
-            .get_u16() as usize;
-        let value_start_index = key_start_index + key_len + SIZEOF_U16;
+        // get the entry starting from offset
+        let mut entry = &self.block.data[offset..];
+        let key_len = entry.get_u16() as usize;
+        let key = &entry[..key_len];
 
-        self.key = key.to_key_vec();
+        // this is not same get_u16
+        // so we have advance the cursor explicitly
+        entry.advance(key_len);
+        self.key.clear();
+        self.key = KeySlice::from_slice(key).to_key_vec();
+
+        let value_len = entry.get_u16() as usize;
+        let value = KeySlice::from_slice(&entry[..value_len].to_vec());
+        entry.advance(value_len);
+
+        let value_start_index = offset + SIZEOF_U16 + key_len + SIZEOF_U16;
+
         self.value_range = (value_start_index, value_start_index + value_len);
     }
 
