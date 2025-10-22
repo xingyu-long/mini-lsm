@@ -150,12 +150,21 @@ impl SsTable {
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
         // read file and decode block_meta data
         let file_len = file.size();
-        let raw_meta_offset = file.read(file.size() - SIZEOF_U32 as u64, SIZEOF_U32 as u64)?;
+        let raw_bloom_offset = file.read(file_len - SIZEOF_U32 as u64, SIZEOF_U32 as u64)?;
+        let bloom_offset = (&raw_bloom_offset[..]).get_u32();
+        let raw_bloom = file.read(
+            bloom_offset as u64,
+            file_len - SIZEOF_U32 as u64 - bloom_offset as u64,
+        )?;
+        let bloom = Bloom::decode(&raw_bloom)?;
+
+        let raw_meta_offset =
+            file.read(bloom_offset as u64 - SIZEOF_U32 as u64, SIZEOF_U32 as u64)?;
         let meta_offset = (&raw_meta_offset[..]).get_u32();
         // here is the len, it's not the end.
         let raw_meta = file.read(
             meta_offset as u64,
-            file_len - SIZEOF_U32 as u64 - meta_offset as u64,
+            bloom_offset as u64 - SIZEOF_U32 as u64 - meta_offset as u64,
         )?;
         let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
         Ok(SsTable {
@@ -166,7 +175,7 @@ impl SsTable {
             last_key: block_meta.last().unwrap().last_key.clone(),
             block_meta: block_meta,
             block_cache: block_cache,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }
