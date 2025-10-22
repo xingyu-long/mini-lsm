@@ -35,6 +35,23 @@ pub struct BlockBuilder {
     first_key: KeyVec,
 }
 
+// return index which means all things before index are same.
+fn compute_overlap(first_key: KeySlice, key: KeySlice) -> usize {
+    let first_key = first_key.raw_ref();
+    let key = key.raw_ref();
+    let mut i = 0;
+    loop {
+        if i >= first_key.len() || i >= key.len() {
+            break;
+        }
+        if first_key[i] != key[i] {
+            break;
+        }
+        i += 1
+    }
+    i
+}
+
 impl BlockBuilder {
     /// Creates a new block builder.
     pub fn new(block_size: usize) -> Self {
@@ -67,17 +84,29 @@ impl BlockBuilder {
             return false;
         }
 
-        if self.data.len() == 0 {
-            // record the first_key
-            self.first_key = key.to_key_vec();
-        }
         self.offsets.push(self.data.len() as u16);
 
         // add key and value
-        self.data.put_u16(key.len() as u16);
-        self.data.put(key.raw_ref());
+        let overlap = compute_overlap(self.first_key.as_key_slice(), key);
+        // key_overlap_len (u16) | rest_key_len (u16) | key (rest_key_len)
+        // example:
+        // first_key = mini-something, above keys are 5|3|LSM
+        // mini-LSM
+        self.data.put_u16(overlap as u16);
+        self.data.put_u16((key.len() - overlap) as u16);
+        self.data.put(&key.raw_ref()[overlap..]);
+
         self.data.put_u16(value.len() as u16);
         self.data.put(value);
+
+        // why moved it here?
+        // for the first key, our expected overlap would be 0
+        // so we should set this first_key at later to avoid issues.
+        // check how Block::get_first_key() was implemented.
+        if self.first_key.is_empty() {
+            // record the first_key
+            self.first_key = key.to_key_vec();
+        }
 
         return true;
     }

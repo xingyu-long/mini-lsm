@@ -40,39 +40,38 @@ pub struct BlockIterator {
     first_key: KeyVec,
 }
 
+impl Block {
+    fn get_first_key(&self) -> KeyVec {
+        let mut buf = &self.data[..];
+        // for the first key, there is no overlap;
+        buf.get_u16();
+        let key_len = buf.get_u16();
+        let key = KeyVec::from_vec(buf[..key_len as usize].to_vec());
+        key
+    }
+}
+
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
         Self {
-            block,
+            first_key: block.get_first_key(),
+            block: block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
         }
     }
 
     /// Creates a block iterator and seek to the first entry.
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
-        let mut iter = Self {
-            block,
-            key: KeyVec::new(),
-            value_range: (0, 0),
-            idx: 0,
-            first_key: KeyVec::new(),
-        };
+        let mut iter = Self::new(block);
         iter.seek_to_first();
         iter
     }
 
     /// Creates a block iterator and seek to the first key that >= `key`.
     pub fn create_and_seek_to_key(block: Arc<Block>, key: KeySlice) -> Self {
-        let mut iter = Self {
-            block,
-            key: KeyVec::new(),
-            value_range: (0, 0),
-            idx: 0,
-            first_key: KeyVec::new(),
-        };
+        let mut iter = Self::new(block);
         iter.seek_to_key(key);
         iter
     }
@@ -117,20 +116,27 @@ impl BlockIterator {
     fn seek_to_offset(&mut self, offset: usize) {
         // get the entry starting from offset
         let mut entry = &self.block.data[offset..];
+
+        // build key with overlap
+        let overlap_len = entry.get_u16() as usize;
+
         let key_len = entry.get_u16() as usize;
         let key = &entry[..key_len];
-
         // this is not same get_u16
         // so we have advance the cursor explicitly
         entry.advance(key_len);
+
         self.key.clear();
-        self.key = KeySlice::from_slice(key).to_key_vec();
+        let mut new_key: Vec<u8> = Vec::new();
+        new_key.extend(&self.first_key.raw_ref()[..overlap_len]);
+        new_key.extend(key);
+        self.key = KeyVec::from_vec(new_key);
 
         let value_len = entry.get_u16() as usize;
         let value = KeySlice::from_slice(&entry[..value_len].to_vec());
         entry.advance(value_len);
 
-        let value_start_index = offset + SIZEOF_U16 + key_len + SIZEOF_U16;
+        let value_start_index = offset + SIZEOF_U16 + SIZEOF_U16 + key_len + SIZEOF_U16;
 
         self.value_range = (value_start_index, value_start_index + value_len);
     }
