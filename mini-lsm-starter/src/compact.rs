@@ -30,8 +30,10 @@ pub use simple_leveled::{
 };
 pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
 
+use crate::iterators::StorageIterator;
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CompactionTask {
@@ -124,11 +126,105 @@ pub enum CompactionOptions {
 
 impl LsmStorageInner {
     fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
-        unimplemented!()
+        let mut new_ssts = Vec::new();
+        match _task {
+            CompactionTask::ForceFullCompaction {
+                l0_sstables,
+                l1_sstables,
+            } => {
+                let snapshot = {
+                    let guard = self.state.read();
+                    Arc::clone(&guard)
+                };
+                let mut iters = Vec::new();
+                for id in l0_sstables.iter() {
+                    iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
+                        snapshot.sstables[id].clone(),
+                    )?));
+                }
+                for id in l1_sstables.iter() {
+                    iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
+                        snapshot.sstables[id].clone(),
+                    )?));
+                }
+                let mut iter = MergeIterator::create(iters);
+
+                // also need to handle builder
+                let mut builder = None;
+
+                while iter.is_valid() {
+                    if builder.is_none() {
+                        builder = Some(SsTableBuilder::new(self.options.block_size));
+                    }
+
+                    let builder_inner = builder.as_mut().unwrap();
+
+                    if !iter.value().is_empty() {
+                        builder_inner.add(iter.key(), iter.value());
+                    }
+
+                    // Q: Do I need to do control how many ssts we should have here?
+                    // A: we use self.options.target_sst_size
+                    if builder_inner.estimated_size() >= self.options.target_sst_size {
+                        // Q: how to get the id?
+                        // A: next_sst_id()
+                        let sst_id = self.next_sst_id();
+                        // WARNING: this will take the builder and leave it with None
+                        let builder = builder.take().unwrap();
+                        let sst =
+                            Arc::new(builder.build(sst_id, None, self.path_of_sst(sst_id))?);
+                        new_ssts.push(sst);
+                    }
+                    iter.next()?;
+                }
+
+                if let Some(builder) = builder {
+                    let sst_id = self.next_sst_id();
+                    let sst = Arc::new(builder.build(sst_id, None, self.path_of_sst(sst_id))?);
+                    new_ssts.push(sst);
+                }
+            }
+            _ => {}
+        }
+        Ok(new_ssts)
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {
-        unimplemented!()
+        let l0_sstables;
+        let l1_sstables;
+        {
+            let snapshot = self.state.read();
+            l0_sstables = snapshot.l0_sstables.clone();
+            l1_sstables = snapshot.levels[0].1.clone();
+        };
+        let new_ssts = self.compact(&CompactionTask::ForceFullCompaction {
+            l0_sstables,
+            l1_sstables,
+        })?;
+
+        // grab the state lock and update it
+        {
+            let state_lock = self.state_lock.lock();
+            let mut guard = self.state.write();
+            let mut snapshot = guard.as_ref().clone();
+
+            for id in snapshot.l0_sstables.iter() {
+                snapshot.sstables.remove(id);
+            }
+            snapshot.l0_sstables.clear();
+
+            for id in snapshot.levels[0].1.iter() {
+                snapshot.sstables.remove(id);
+            }
+            snapshot.levels[0].1.clear();
+            for new_sst in new_ssts.iter() {
+                snapshot.levels[0].1.push(new_sst.sst_id());
+                snapshot.sstables.insert(new_sst.sst_id(), new_sst.clone());
+            }
+            *guard = Arc::new(snapshot);
+        }
+
+        Ok(())
     }
 
     fn trigger_compaction(&self) -> Result<()> {
