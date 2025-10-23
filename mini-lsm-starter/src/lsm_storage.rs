@@ -31,6 +31,7 @@ use crate::compact::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
 use crate::iterators::StorageIterator;
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
@@ -362,9 +363,27 @@ impl LsmStorageInner {
         }
 
         // we don't need to walk through all items since we only care if the first key is _key
-        let iter = MergeIterator::create(sstable_iters);
-        if iter.is_valid() && iter.key() == KeySlice::from_slice(_key) && !iter.value().is_empty() {
-            return Ok(Some(Bytes::copy_from_slice(iter.value())));
+        let l0_iter = MergeIterator::create(sstable_iters);
+        if l0_iter.is_valid()
+            && l0_iter.key() == KeySlice::from_slice(_key)
+            && !l0_iter.value().is_empty()
+        {
+            return Ok(Some(Bytes::copy_from_slice(l0_iter.value())));
+        }
+
+        let mut l1_ssts_to_concat = Vec::with_capacity(snapshot.levels[0].1.len());
+        for sst_id in snapshot.levels[0].1.iter() {
+            l1_ssts_to_concat.push(snapshot.sstables[sst_id].clone());
+        }
+        let l1_iter = SstConcatIterator::create_and_seek_to_key(
+            l1_ssts_to_concat,
+            KeySlice::from_slice(_key),
+        )?;
+        if l1_iter.is_valid()
+            && l1_iter.key() == KeySlice::from_slice(_key)
+            && !l1_iter.key().is_empty()
+        {
+            return Ok(Some(Bytes::copy_from_slice(l1_iter.value())));
         }
 
         Ok(None)
@@ -556,16 +575,16 @@ impl LsmStorageInner {
             let guard = self.state.read();
             Arc::clone(&guard)
         };
-        let mut all_iters = Vec::new();
+        let mut mem_iters = Vec::new();
 
         let mem_iter = snapshot.memtable.scan(_lower, _upper);
-        all_iters.push(Box::new(mem_iter));
+        mem_iters.push(Box::new(mem_iter));
 
         for table in snapshot.imm_memtables.iter() {
-            all_iters.push(Box::new(table.scan(_lower, _upper)));
+            mem_iters.push(Box::new(table.scan(_lower, _upper)));
         }
 
-        let mut sstables = Vec::with_capacity(snapshot.l0_sstables.len());
+        let mut l0_sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sst_id in snapshot.l0_sstables.iter() {
             let sstable = snapshot.sstables[sst_id].clone();
             // rule out these impossible ranges
@@ -593,14 +612,28 @@ impl LsmStorageInner {
                     }
                     Bound::Unbounded => SsTableIterator::create_and_seek_to_first(sstable)?,
                 };
-                sstables.push(Box::new(iter));
+                l0_sst_iters.push(Box::new(iter));
             }
         }
 
-        let memtable_iter = MergeIterator::create(all_iters);
-        let table_iter = MergeIterator::create(sstables);
+        let mut l1_ssts_to_concat = Vec::with_capacity(snapshot.levels[0].1.len());
+        for sst_id in snapshot.levels[0].1.iter() {
+            l1_ssts_to_concat.push(snapshot.sstables[sst_id].clone());
+        }
 
-        let iter = TwoMergeIterator::create(memtable_iter, table_iter)?;
+        // construct a two merge iterator that merges memtables and L0 SSTs,
+        // and another merge iterator that merges that iterator with the L1 concat iterator.
+        // A: TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>
+        // B: SstableConcatIterator<L1_sstables>
+        // TwoMergeIterator<A, B>
+
+        let memtable_iter = MergeIterator::create(mem_iters);
+        let l0_iter = MergeIterator::create(l0_sst_iters);
+
+        let iter = TwoMergeIterator::create(
+            TwoMergeIterator::create(memtable_iter, l0_iter)?,
+            SstConcatIterator::create_and_seek_to_first(l1_ssts_to_concat)?,
+        )?;
 
         Ok(FusedIterator::new(LsmIterator::new(
             iter,
