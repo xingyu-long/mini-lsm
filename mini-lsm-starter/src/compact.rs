@@ -131,6 +131,7 @@ impl LsmStorageInner {
     fn compact_generate_sst_from_iter(
         &self,
         mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
+        is_lower_level_bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut new_ssts = Vec::new();
 
@@ -144,7 +145,14 @@ impl LsmStorageInner {
 
             let builder_inner = builder.as_mut().unwrap();
 
-            if !iter.value().is_empty() {
+            // if it's in bottom level, we can ignore the empty values
+            // otherwise, we should keep the value even if it's empty
+            // since the other lower levels might have some invalid values.
+            if is_lower_level_bottom_level {
+                if !iter.value().is_empty() {
+                    builder_inner.add(iter.key(), iter.value());
+                }
+            } else {
                 builder_inner.add(iter.key(), iter.value());
             }
 
