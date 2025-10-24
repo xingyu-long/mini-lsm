@@ -178,15 +178,15 @@ impl LsmStorageInner {
         Ok(new_ssts)
     }
     fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
         match _task {
             CompactionTask::ForceFullCompaction {
                 l0_sstables,
                 l1_sstables,
             } => {
-                let snapshot = {
-                    let guard = self.state.read();
-                    Arc::clone(&guard)
-                };
                 let mut l0_iters = Vec::with_capacity(l0_sstables.len());
                 for id in l0_sstables.iter() {
                     l0_iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
@@ -202,7 +202,7 @@ impl LsmStorageInner {
                     SstConcatIterator::create_and_seek_to_first(l1_ssts_to_concat)?,
                 )?;
 
-                self.compact_generate_sst_from_iter(iter)
+                self.compact_generate_sst_from_iter(iter, _task.compact_to_bottom_level())
             }
             CompactionTask::Simple(SimpleLeveledCompactionTask {
                 upper_level,
@@ -210,14 +210,44 @@ impl LsmStorageInner {
                 lower_level,
                 lower_level_sst_ids,
                 ..
-            }) => {
-                match upper_level {
-                    Some(_) => {}
-                    None => {}
-                }
+            }) => match upper_level {
+                Some(_) => {
+                    let mut upper_ssts = Vec::with_capacity(upper_level_sst_ids.len());
+                    for sst_id in upper_level_sst_ids.iter() {
+                        upper_ssts.push(snapshot.sstables[sst_id].clone());
+                    }
+                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_ssts)?;
 
-                unimplemented!()
-            }
+                    let mut lower_ssts = Vec::with_capacity(lower_level_sst_ids.len());
+                    for sst_id in lower_level_sst_ids.iter() {
+                        lower_ssts.push(snapshot.sstables[sst_id].clone());
+                    }
+                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+
+                    let iter = TwoMergeIterator::create(upper_iter, lower_iter)?;
+                    self.compact_generate_sst_from_iter(iter, _task.compact_to_bottom_level())
+                }
+                None => {
+                    // use MergeIterator for L0 since it's not sorted
+                    let mut upper_iters = Vec::with_capacity(upper_level_sst_ids.len());
+                    for sst_id in upper_level_sst_ids.iter() {
+                        upper_iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
+                            snapshot.sstables[sst_id].clone(),
+                        )?));
+                    }
+
+                    let upper_iter = MergeIterator::create(upper_iters);
+
+                    let mut lower_ssts = Vec::with_capacity(lower_level_sst_ids.len());
+                    for sst_id in lower_level_sst_ids.iter() {
+                        lower_ssts.push(snapshot.sstables[sst_id].clone());
+                    }
+                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+
+                    let iter = TwoMergeIterator::create(upper_iter, lower_iter)?;
+                    self.compact_generate_sst_from_iter(iter, _task.compact_to_bottom_level())
+                }
+            },
             _ => {
                 unimplemented!()
             }
@@ -271,6 +301,67 @@ impl LsmStorageInner {
     }
 
     fn trigger_compaction(&self) -> Result<()> {
+        // 1. trigger compaction with task
+        // 2. call controller.apply_compaction_result to update interal states: l0_sstables, levels
+        // 3. update snapshot sstables and related info
+        // 4. remove all old files
+        let snapshot = {
+            let guard = self.state.read();
+            guard.clone()
+        };
+        let task = self
+            .compaction_controller
+            .generate_compaction_task(&snapshot);
+        if task.is_none() {
+            return Ok(());
+        }
+        let task = task.unwrap();
+        println!("Running compaction task: {:?}", task);
+
+        let new_ssts = self.compact(&task)?;
+        let files_added = new_ssts.len();
+
+        // this will be used in apply_compaction_result(...)
+        let output = new_ssts.iter().map(|x| x.sst_id()).collect::<Vec<_>>();
+        let ssts_to_remove = {
+            //  grab the state_lock since we will update snapshot interal state;
+            let _state_lock = self.state_lock.lock();
+
+            let (mut new_snapshot, to_be_removed) = self
+                .compaction_controller
+                .apply_compaction_result(&snapshot, &task, &output, false);
+            let mut ssts_to_remove = Vec::with_capacity(to_be_removed.len());
+            for file_to_remove in to_be_removed.iter() {
+                let result = new_snapshot.sstables.remove(file_to_remove);
+                assert!(result.is_some());
+                ssts_to_remove.push(result.unwrap());
+            }
+
+            let mut new_sst_ids = Vec::new();
+            for file_to_add in new_ssts.iter() {
+                new_sst_ids.push(file_to_add.sst_id());
+                let result = new_snapshot
+                    .sstables
+                    .insert(file_to_add.sst_id(), file_to_add.clone());
+                // ensure this is the new key
+                assert!(result.is_none());
+            }
+
+            let mut guard = self.state.write();
+            *guard = Arc::new(new_snapshot);
+
+            ssts_to_remove
+        };
+
+        println!(
+            "compaction finished: {} files removed, {} files added",
+            ssts_to_remove.len(),
+            files_added
+        );
+        for file_to_remove in ssts_to_remove.iter() {
+            std::fs::remove_file(self.path_of_sst(file_to_remove.sst_id()))?;
+        }
+
         Ok(())
     }
 

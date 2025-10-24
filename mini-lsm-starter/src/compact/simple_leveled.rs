@@ -55,7 +55,6 @@ impl SimpleLeveledCompactionController {
         for (_, files) in _snapshot.levels.iter() {
             level_sizes.push(files.len());
         }
-        println!("level_sizes = {:?}", level_sizes);
 
         // handle l0 -> l1
         if _snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
