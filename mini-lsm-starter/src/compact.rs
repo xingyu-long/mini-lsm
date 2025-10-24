@@ -34,6 +34,7 @@ use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
@@ -127,8 +128,48 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
-    fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
+    fn compact_generate_sst_from_iter(
+        &self,
+        mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
+    ) -> Result<Vec<Arc<SsTable>>> {
         let mut new_ssts = Vec::new();
+
+        // also need to handle builder
+        let mut builder = None;
+
+        while iter.is_valid() {
+            if builder.is_none() {
+                builder = Some(SsTableBuilder::new(self.options.block_size));
+            }
+
+            let builder_inner = builder.as_mut().unwrap();
+
+            if !iter.value().is_empty() {
+                builder_inner.add(iter.key(), iter.value());
+            }
+
+            // Q: Do I need to do control how many ssts we should have here?
+            // A: we use self.options.target_sst_size
+            if builder_inner.estimated_size() >= self.options.target_sst_size {
+                // Q: how to get the id?
+                // A: next_sst_id()
+                let sst_id = self.next_sst_id();
+                // WARNING: this will take the builder and leave it with None
+                let builder = builder.take().unwrap();
+                let sst = Arc::new(builder.build(sst_id, None, self.path_of_sst(sst_id))?);
+                new_ssts.push(sst);
+            }
+            iter.next()?;
+        }
+
+        if let Some(builder) = builder {
+            let sst_id = self.next_sst_id();
+            let sst = Arc::new(builder.build(sst_id, None, self.path_of_sst(sst_id))?);
+            new_ssts.push(sst);
+        }
+        Ok(new_ssts)
+    }
+    fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         match _task {
             CompactionTask::ForceFullCompaction {
                 l0_sstables,
@@ -148,49 +189,31 @@ impl LsmStorageInner {
                 for id in l1_sstables.iter() {
                     l1_ssts_to_concat.push(snapshot.sstables[id].clone());
                 }
-                let mut iter = TwoMergeIterator::create(
+                let iter = TwoMergeIterator::create(
                     MergeIterator::create(l0_iters),
                     SstConcatIterator::create_and_seek_to_first(l1_ssts_to_concat)?,
                 )?;
 
-                // also need to handle builder
-                let mut builder = None;
-
-                while iter.is_valid() {
-                    if builder.is_none() {
-                        builder = Some(SsTableBuilder::new(self.options.block_size));
-                    }
-
-                    let builder_inner = builder.as_mut().unwrap();
-
-                    if !iter.value().is_empty() {
-                        builder_inner.add(iter.key(), iter.value());
-                    }
-
-                    // Q: Do I need to do control how many ssts we should have here?
-                    // A: we use self.options.target_sst_size
-                    if builder_inner.estimated_size() >= self.options.target_sst_size {
-                        // Q: how to get the id?
-                        // A: next_sst_id()
-                        let sst_id = self.next_sst_id();
-                        // WARNING: this will take the builder and leave it with None
-                        let builder = builder.take().unwrap();
-                        let sst =
-                            Arc::new(builder.build(sst_id, None, self.path_of_sst(sst_id))?);
-                        new_ssts.push(sst);
-                    }
-                    iter.next()?;
-                }
-
-                if let Some(builder) = builder {
-                    let sst_id = self.next_sst_id();
-                    let sst = Arc::new(builder.build(sst_id, None, self.path_of_sst(sst_id))?);
-                    new_ssts.push(sst);
-                }
+                self.compact_generate_sst_from_iter(iter)
             }
-            _ => {}
+            CompactionTask::Simple(SimpleLeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level,
+                lower_level_sst_ids,
+                ..
+            }) => {
+                match upper_level {
+                    Some(_) => {}
+                    None => {}
+                }
+
+                unimplemented!()
+            }
+            _ => {
+                unimplemented!()
+            }
         }
-        Ok(new_ssts)
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {
@@ -240,7 +263,7 @@ impl LsmStorageInner {
     }
 
     fn trigger_compaction(&self) -> Result<()> {
-        unimplemented!()
+        Ok(())
     }
 
     pub(crate) fn spawn_compaction_thread(
