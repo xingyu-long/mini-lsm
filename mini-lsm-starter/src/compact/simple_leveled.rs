@@ -49,7 +49,60 @@ impl SimpleLeveledCompactionController {
         &self,
         _snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
-        unimplemented!()
+        // record size of each level
+        let mut level_sizes = Vec::new();
+        level_sizes.push(_snapshot.l0_sstables.len());
+        for (_, files) in _snapshot.levels.iter() {
+            level_sizes.push(files.len());
+        }
+        println!("level_sizes = {:?}", level_sizes);
+
+        // handle l0 -> l1
+        if _snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+            println!(
+                "compaction triggered at level 0 because L0 has {} SSTs >= {}",
+                _snapshot.l0_sstables.len(),
+                self.options.level0_file_num_compaction_trigger
+            );
+            return Some(SimpleLeveledCompactionTask {
+                upper_level: None,
+                upper_level_sst_ids: _snapshot.l0_sstables.clone(),
+                lower_level: 1,
+                lower_level_sst_ids: _snapshot.levels[0].1.clone(),
+                is_lower_level_bottom_level: false,
+            });
+        }
+
+        // handle l{x} -> l{x+1}, for example, l1 -> l2
+        // NOTE: max_levels: the number of levels (excluding L0) in the LSM tree.
+        for i in 1..self.options.max_levels {
+            // if the curent is 0 and nothing to flush to next level;
+            // 0.0 / 0.0 -> NaN, but don't want use this hack for the later value comparison.
+            if level_sizes[i] == 0 {
+                continue;
+            }
+            let lower_level = i + 1;
+            let size_ratio = level_sizes[lower_level] as f64 / level_sizes[i] as f64;
+            if size_ratio * 100.0 < self.options.size_ratio_percent as f64 {
+                println!(
+                    "compaction triggered at level {} and {} with size ratio {}",
+                    i, lower_level, size_ratio
+                );
+                // Q: why do we use `i-1`, `lower_level - 1`?
+                // A:
+                // L0 -> l0_sstables
+                // L1 -> _snapshot.levels[0]
+                // L2 -> _snapshot.levels[1]
+                return Some(SimpleLeveledCompactionTask {
+                    upper_level: Some(i),
+                    upper_level_sst_ids: _snapshot.levels[i - 1].1.clone(),
+                    lower_level: lower_level,
+                    lower_level_sst_ids: _snapshot.levels[lower_level - 1].1.clone(),
+                    is_lower_level_bottom_level: lower_level == self.options.max_levels,
+                });
+            }
+        }
+        None
     }
 
     /// Apply the compaction result.
@@ -63,8 +116,35 @@ impl SimpleLeveledCompactionController {
         &self,
         _snapshot: &LsmStorageState,
         _task: &SimpleLeveledCompactionTask,
-        _output: &[usize],
+        _output: &[usize], // this is output for next sst ids after compaction.
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        let mut snapshot = _snapshot.clone();
+        let mut to_be_removed = Vec::new();
+
+        let lower_level = _task.lower_level;
+
+        // the index for snapshot.levels is `*_level - 1`
+        if let Some(upper_level) = _task.upper_level {
+            // L{x} -> L{x+1}
+            assert_eq!(
+                _task.upper_level_sst_ids,
+                snapshot.levels[upper_level - 1].1
+            );
+            to_be_removed.extend(&snapshot.levels[upper_level - 1].1);
+            snapshot.levels[upper_level - 1].1.clear();
+        } else {
+            // L0 -> L1
+            assert_eq!(_task.upper_level_sst_ids, snapshot.l0_sstables);
+            to_be_removed.extend(&snapshot.l0_sstables);
+            snapshot.l0_sstables.clear();
+        }
+        assert_eq!(
+            _task.lower_level_sst_ids,
+            snapshot.levels[lower_level - 1].1
+        );
+        to_be_removed.extend(&snapshot.levels[lower_level - 1].1);
+        snapshot.levels[lower_level - 1].1 = _output.to_vec();
+
+        (snapshot, to_be_removed)
     }
 }
