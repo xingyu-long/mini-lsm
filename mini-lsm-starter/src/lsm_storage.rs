@@ -521,7 +521,7 @@ impl LsmStorageInner {
             // old_memtable = snapshot.memtable.clone();
             // snapshot.memtable = memtable;
 
-            snapshot.imm_memtables.insert(0, old_memtable);
+            snapshot.imm_memtables.insert(0, old_memtable.clone());
 
             // TODO(xingyu): do we need to reset approximate_size???
             // update the snapshot
@@ -559,6 +559,7 @@ impl LsmStorageInner {
             let mem = snapshot.imm_memtables.pop().unwrap();
             assert_eq!(mem.id(), sst_id);
             snapshot.l0_sstables.insert(0, sst_id);
+            println!("xxx-l0_sstables={:?}", &snapshot.l0_sstables);
             println!("flushed {}.sst with size={}", sst_id, sstable.table_size());
             snapshot.sstables.insert(sst_id, sstable);
 
