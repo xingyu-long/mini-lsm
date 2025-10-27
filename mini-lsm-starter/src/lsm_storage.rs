@@ -399,21 +399,26 @@ impl LsmStorageInner {
             }
         }
 
-        let mut l1_ssts_to_concat = Vec::with_capacity(snapshot.levels[0].1.len());
-        for sst_id in snapshot.levels[0].1.iter() {
-            let sstable = snapshot.sstables[sst_id].clone();
-            if is_valid_table(_key, &sstable) {
-                l1_ssts_to_concat.push(sstable);
+        // expand this read from L1(i.e., levels[0]) to all levels
+        let mut iters_after_l0 = Vec::new();
+        for (_, sst_ids) in snapshot.levels.iter() {
+            let mut ssts_to_concat = Vec::with_capacity(sst_ids.len());
+            for sst_id in sst_ids {
+                let sstable = &snapshot.sstables[sst_id];
+                if is_valid_table(_key, sstable) {
+                    ssts_to_concat.push(sstable.clone());
+                }
             }
+
+            iters_after_l0.push(Box::new(SstConcatIterator::create_and_seek_to_key(
+                ssts_to_concat,
+                KeySlice::from_slice(_key),
+            )?));
         }
 
-        let iter = TwoMergeIterator::create(
-            MergeIterator::create(l0_iters),
-            SstConcatIterator::create_and_seek_to_key(
-                l1_ssts_to_concat,
-                KeySlice::from_slice(_key),
-            )?,
-        )?;
+        let merge_iter_after_l0 = MergeIterator::create(iters_after_l0);
+
+        let iter = TwoMergeIterator::create(MergeIterator::create(l0_iters), merge_iter_after_l0)?;
 
         // we don't need to walk through all items since we only care if the first key is _key
         if iter.is_valid() && iter.key() == KeySlice::from_slice(_key) && !iter.value().is_empty() {
@@ -620,11 +625,43 @@ impl LsmStorageInner {
             }
         }
 
-        let mut l1_ssts_to_concat = Vec::with_capacity(snapshot.levels[0].1.len());
-        for sst_id in snapshot.levels[0].1.iter() {
-            l1_ssts_to_concat.push(snapshot.sstables[sst_id].clone());
+        let mut iters_after_l0 = Vec::new();
+        for (_, sst_ids) in snapshot.levels.iter() {
+            let mut ssts_to_concat = Vec::with_capacity(sst_ids.len());
+            for sst_id in sst_ids {
+                let sstable = &snapshot.sstables[sst_id];
+                if range_overlap(
+                    _lower,
+                    _upper,
+                    sstable.first_key().raw_ref(),
+                    sstable.last_key().raw_ref(),
+                ) {
+                    ssts_to_concat.push(sstable.clone());
+                }
+            }
+            let iter = match _lower {
+                Bound::Included(key) => SstConcatIterator::create_and_seek_to_key(
+                    ssts_to_concat,
+                    KeySlice::from_slice(key),
+                )?,
+                Bound::Excluded(key) => {
+                    let mut temp_iter = SstConcatIterator::create_and_seek_to_key(
+                        ssts_to_concat,
+                        KeySlice::from_slice(key),
+                    )?;
+                    if temp_iter.is_valid() && temp_iter.key() == KeySlice::from_slice(key) {
+                        temp_iter.next()?;
+                    }
+                    temp_iter
+                }
+                Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(ssts_to_concat)?,
+            };
+            iters_after_l0.push(Box::new(iter));
         }
 
+        let merge_iter_after_l0 = MergeIterator::create(iters_after_l0);
+
+        // Note from week2_day1: task3
         // construct a two merge iterator that merges memtables and L0 SSTs,
         // and another merge iterator that merges that iterator with the L1 concat iterator.
         // A: TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>
@@ -636,7 +673,7 @@ impl LsmStorageInner {
 
         let iter = TwoMergeIterator::create(
             TwoMergeIterator::create(memtable_iter, l0_iter)?,
-            SstConcatIterator::create_and_seek_to_first(l1_ssts_to_concat)?,
+            merge_iter_after_l0,
         )?;
 
         Ok(FusedIterator::new(LsmIterator::new(

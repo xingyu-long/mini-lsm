@@ -316,6 +316,7 @@ impl LsmStorageInner {
             return Ok(());
         }
         let task = task.unwrap();
+        self.dump_structure();
         println!("Running compaction task: {:?}", task);
 
         let new_ssts = self.compact(&task)?;
@@ -354,9 +355,10 @@ impl LsmStorageInner {
         };
 
         println!(
-            "compaction finished: {} files removed, {} files added",
+            "compaction finished: {} files removed, {} files added, output={:?}",
             ssts_to_remove.len(),
-            files_added
+            files_added,
+            output,
         );
         for file_to_remove in ssts_to_remove.iter() {
             std::fs::remove_file(self.path_of_sst(file_to_remove.sst_id()))?;
