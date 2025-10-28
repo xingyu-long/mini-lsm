@@ -36,6 +36,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -387,6 +388,14 @@ impl LsmStorageInner {
 
             let mut guard = self.state.write();
             *guard = Arc::new(new_snapshot);
+            drop(guard);
+
+            self.sync_dir()?;
+            // record the compaction task & results into Manifest file.
+            self.manifest
+                .as_ref()
+                .unwrap()
+                .add_record_when_init(ManifestRecord::Compaction(task, new_sst_ids))?;
 
             ssts_to_remove
         };
