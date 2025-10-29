@@ -40,7 +40,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
+use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -332,7 +332,10 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
-        let state = LsmStorageState::create(&options);
+        let manifest;
+        let block_cache = Arc::new(BlockCache::new(1 << 20));
+        let mut state = LsmStorageState::create(&options);
+        let mut next_sst_id = 1;
 
         let compaction_controller = match &options.compaction_options {
             CompactionOptions::Leveled(options) => {
@@ -351,18 +354,79 @@ impl LsmStorageInner {
             std::fs::create_dir(path)?;
         }
 
+        // recover from manifest file
+        let manifest_file = path.join("MANIFEST");
+        if !manifest_file.exists() {
+            manifest = Manifest::create(manifest_file)?;
+        } else {
+            let (m, records) = Manifest::recover(manifest_file)?;
+            for record in records {
+                match record {
+                    ManifestRecord::Flush(sst_id) => {
+                        // this Flush means from imm_memtables to l0_sstables
+                        if compaction_controller.flush_to_l0() {
+                            state.l0_sstables.insert(0, sst_id);
+                        } else {
+                            state.levels.insert(0, (sst_id, vec![sst_id]));
+                        }
+                        next_sst_id = next_sst_id.max(sst_id);
+                    }
+                    ManifestRecord::Compaction(task, output) => {
+                        // this call would modify l0_sstables and levels accordingly
+                        let (new_state, _) = compaction_controller
+                            .apply_compaction_result(&state, &task, &output, true);
+                        state = new_state;
+                        next_sst_id =
+                            next_sst_id.max(output.iter().max().copied().unwrap_or_default());
+                    }
+                    _ => {
+                        unimplemented!()
+                    }
+                }
+            }
+
+            // recover SST, specifically for sstables (HashMap)
+            // iterate l0_sstables and levels to construct the HashMap
+            for sst_id in state
+                .l0_sstables
+                .iter()
+                .chain(state.levels.iter().map(|(_, files)| files).flatten())
+            {
+                let sst_id = *sst_id;
+                let sst = SsTable::open(
+                    sst_id,
+                    Some(block_cache.clone()),
+                    FileObject::open(&Self::path_of_sst_static(path, sst_id))?,
+                )?;
+
+                state.sstables.insert(sst_id, Arc::new(sst));
+                next_sst_id = next_sst_id.max(sst_id);
+            }
+
+            manifest = m;
+        }
+
+        next_sst_id += 1;
+
+        // memtable also use sst_id
+        state.memtable = Arc::new(MemTable::create(next_sst_id));
+
+        next_sst_id += 1;
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
-            block_cache: Arc::new(BlockCache::new(1024)),
-            next_sst_id: AtomicUsize::new(1),
+            block_cache: block_cache,
+            next_sst_id: AtomicUsize::new(next_sst_id),
             compaction_controller,
-            manifest: None,
+            manifest: Some(manifest),
             options: options.into(),
             mvcc: None,
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
+
+        storage.sync_dir()?;
 
         Ok(storage)
     }
