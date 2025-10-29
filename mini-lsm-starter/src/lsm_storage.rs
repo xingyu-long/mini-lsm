@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -40,7 +40,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -332,10 +332,7 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
-        let mut state = LsmStorageState::create(&options);
-        let mut next_sst_id = 1;
-        let block_cache = Arc::new(BlockCache::new(1 << 20));
-        let manifest;
+        let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
             CompactionOptions::Leveled(options) => {
@@ -351,74 +348,21 @@ impl LsmStorageInner {
         };
 
         if !path.exists() {
-            std::fs::create_dir_all(path)?;
-        }
-
-        // recover from manifest.
-        let manifest_path = path.join("MANIFEST");
-        if !manifest_path.exists() {
-            manifest = Manifest::create(manifest_path)?;
-        } else {
-            let (m, records) = Manifest::recover(manifest_path)?;
-            for record in records {
-                match record {
-                    ManifestRecord::Flush(sst_id) => {
-                        if compaction_controller.flush_to_l0() {
-                            state.l0_sstables.insert(0, sst_id);
-                        } else {
-                            state.levels.insert(0, (sst_id, vec![sst_id]));
-                        }
-                        next_sst_id = next_sst_id.max(sst_id);
-                    }
-                    ManifestRecord::Compaction(task, sst_ids) => {
-                        let (new_state, _) = compaction_controller
-                            .apply_compaction_result(&state, &task, &sst_ids, true);
-                        state = new_state;
-                        next_sst_id =
-                            next_sst_id.max(sst_ids.iter().max().copied().unwrap_or_default());
-                    }
-                    _ => {
-                        unimplemented!()
-                    }
-                }
-            }
-
-            // recover SSTs and its sstable (HashMap)
-            for sst_id in state
-                .l0_sstables
-                .iter()
-                .chain(state.levels.iter().map(|(_, files)| files).flatten())
-            {
-                let sst_id = *sst_id;
-                let sst = SsTable::open(
-                    sst_id,
-                    Some(block_cache.clone()),
-                    FileObject::open(&Self::path_of_sst_static(path, sst_id))?,
-                )?;
-                state.sstables.insert(sst_id, Arc::new(sst));
-            }
-
-            next_sst_id += 1;
-            state.memtable = Arc::new(MemTable::create(next_sst_id));
-
-            next_sst_id += 1;
-            manifest = m;
+            std::fs::create_dir(path)?;
         }
 
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
-            block_cache: block_cache,
-            next_sst_id: AtomicUsize::new(next_sst_id),
+            block_cache: Arc::new(BlockCache::new(1024)),
+            next_sst_id: AtomicUsize::new(1),
             compaction_controller,
-            manifest: Some(manifest),
+            manifest: None,
             options: options.into(),
             mvcc: None,
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
-
-        storage.sync_dir()?;
 
         Ok(storage)
     }
