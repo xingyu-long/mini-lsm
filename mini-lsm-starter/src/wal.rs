@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
@@ -55,12 +55,23 @@ impl Wal {
         file.read_to_end(&mut buf)?;
         let mut rbuf = buf.iter().as_slice();
         while rbuf.has_remaining() {
+            let mut checksum_buf = Vec::new();
             let key_len = rbuf.get_u16() as usize;
             let key = Bytes::copy_from_slice(&rbuf[..key_len]);
             rbuf.advance(key_len);
+            checksum_buf.put_u16(key_len as u16);
+            checksum_buf.put(&key[..]);
+
             let value_len = rbuf.get_u16() as usize;
             let value = Bytes::copy_from_slice(&rbuf[..value_len]);
             rbuf.advance(value_len);
+            checksum_buf.put_u16(value_len as u16);
+            checksum_buf.put(&value[..]);
+
+            let checksum = rbuf.get_u32();
+            if checksum != crc32fast::hash(&checksum_buf) {
+                bail!("checksum doesn't match!");
+            }
 
             _skiplist.insert(key, value);
         }
@@ -69,7 +80,7 @@ impl Wal {
         })
     }
 
-    // | key_len | key | value_len | value |
+    // | key_len | key | value_len | value | checksum |
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
         let mut file = self.file.lock();
         let mut buf: Vec<u8> = Vec::with_capacity(SIZEOF_U16 * 2 + _key.len() + _value.len());
@@ -77,6 +88,10 @@ impl Wal {
         buf.put(_key);
         buf.put_u16(_value.len() as u16);
         buf.put(_value);
+
+        // add checksum here
+        let checksum = crc32fast::hash(&buf);
+        buf.put_u32(checksum);
 
         file.write_all(&buf)?;
         file.flush().unwrap();
