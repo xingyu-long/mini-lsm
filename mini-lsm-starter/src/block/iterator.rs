@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::sync::Arc;
 
 use bytes::Buf;
@@ -133,8 +130,6 @@ impl BlockIterator {
         self.key = KeyVec::from_vec(new_key);
 
         let value_len = entry.get_u16() as usize;
-        let value = KeySlice::from_slice(&entry[..value_len].to_vec());
-        entry.advance(value_len);
 
         let value_start_index = offset + SIZEOF_U16 + SIZEOF_U16 + key_len + SIZEOF_U16;
 
