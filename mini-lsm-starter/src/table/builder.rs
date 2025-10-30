@@ -84,6 +84,15 @@ impl SsTableBuilder {
         self.last_key.extend(key.raw_ref());
     }
     // finish the current block and use another new build
+    //
+    // -------------------------------------------------------------------------------------------
+    // |         Block Section         |          Meta Section         |          Extra          |
+    // -------------------------------------------------------------------------------------------
+    // | data block | ... | data block |            metadata           | meta block offset (u32) |
+    // -------------------------------------------------------------------------------------------
+    //     |
+    //     |
+    //     |--> | data block #1 | <-> | entry #1 | checksum #1 |
     fn finish_block(&mut self) {
         let old_builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let encoded = old_builder.build().encode();

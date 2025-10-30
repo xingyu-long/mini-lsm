@@ -20,7 +20,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 pub use builder::SsTableBuilder;
 use bytes::Buf;
 pub use iterator::SsTableIterator;
@@ -42,18 +42,26 @@ pub struct BlockMeta {
     pub last_key: KeyBytes,
 }
 
-// -------------------------------------------------------------------------------------------
-// |         Block Section         |          Meta Section         |          Extra          |
-// -------------------------------------------------------------------------------------------
-// | data block | ... | data block |            metadata           | meta block offset (u32) |
-// -------------------------------------------------------------------------------------------
-
-// | offset | first_key_len| first_key | last_key_len | last_key |
+// -----------------------------------------------------------
+// |          Meta Section         |          Extra          |
+// -----------------------------------------------------------
+// |            metadata           | meta block offset (u32) |
+// -----------------------------------------------------------
+//   |
+//   |
+//   |---> | number of  meta block (u32) | metadata for block#1 | ... | metadata for block #N | checksum for metadata u32 | meta block offset u32 |
+//                                              |
+//                                              |
+//                                              |
+//                                              |-> | offset for data block | first_key_len| first_key | last_key_len | last_key |
 impl BlockMeta {
     /// Encode block meta to a buffer.
     /// You may add extra fields to the buffer,
     /// in order to help keep track of `first_key` when decoding from the same buffer in the future.
     pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
+        let original_len = buf.len();
+        buf.put_u32(block_meta.len() as u32);
+
         // TODO(xingyu): improve this by acquiring buffer pool with a calculated size;
         for meta_data in block_meta.iter() {
             let first_key_len = meta_data.first_key.len();
@@ -64,12 +72,20 @@ impl BlockMeta {
             buf.put_u16(last_key_len as u16);
             buf.put(meta_data.last_key.raw_ref());
         }
+
+        // WARN: we shouldn't include the first u32 since it's for number of block_meta
+        let checksum = crc32fast::hash(&buf[original_len + SIZEOF_U32..]);
+        buf.put_u32(checksum);
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(mut buf: impl Buf) -> Vec<BlockMeta> {
+    pub fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>> {
         let mut meta_data_blocks = Vec::new();
-        while buf.has_remaining() {
+
+        let num_block_meta = buf.get_u32();
+        let raw_block_meta = &buf[..buf.remaining() - SIZEOF_U32];
+
+        for _ in 0..num_block_meta {
             let offset = buf.get_u32() as usize;
             let first_key_len = buf.get_u16() as usize;
             let first_key = buf.copy_to_bytes(first_key_len);
@@ -81,7 +97,13 @@ impl BlockMeta {
                 last_key: KeyBytes::from_bytes(last_key),
             });
         }
-        meta_data_blocks
+
+        let checksum = buf.get_u32();
+        if checksum != crc32fast::hash(raw_block_meta) {
+            bail!("checksum doesn't match!");
+        }
+
+        Ok(meta_data_blocks)
     }
 }
 
@@ -163,7 +185,7 @@ impl SsTable {
             meta_offset as u64,
             bloom_offset as u64 - SIZEOF_U32 as u64 - meta_offset as u64,
         )?;
-        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
+        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
         Ok(SsTable {
             id: id,
             file: file,
