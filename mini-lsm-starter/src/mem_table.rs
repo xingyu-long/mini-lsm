@@ -66,8 +66,7 @@ impl MemTable {
     /// Create a new mem-table with WAL
     pub fn create_with_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
         let path = _path.as_ref();
-        let wal_path = path.join(format!("{}.wal", _id));
-        let wal = Wal::create(wal_path)?;
+        let wal = Wal::create(path)?;
 
         Ok(Self {
             map: Arc::new(SkipMap::new()),
@@ -80,10 +79,9 @@ impl MemTable {
     /// Create a memtable from WAL
     pub fn recover_from_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
         let path = _path.as_ref();
-        let wal_path = path.join(format!("{}.wal", _id));
         let skiplist = SkipMap::new();
 
-        let wal = Wal::recover(wal_path, &skiplist)?;
+        let wal = Wal::recover(path, &skiplist)?;
         Ok(Self {
             map: Arc::new(skiplist),
             wal: Some(wal),
