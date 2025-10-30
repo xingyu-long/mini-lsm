@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::BufMut;
+use crc32fast;
 
 use super::{BlockMeta, SsTable};
 use crate::{
@@ -92,8 +93,13 @@ impl SsTableBuilder {
             first_key: KeyVec::from_vec(self.first_key.clone()).into_key_bytes(),
             last_key: KeyVec::from_vec(self.last_key.clone()).into_key_bytes(),
         });
+        // calculate the checksum for this block and will be added as put_u32
+        let checksum = crc32fast::hash(&encoded);
+
         // update the data
         self.data.put(encoded);
+
+        self.data.put_u32(checksum);
     }
 
     /// Get the estimated size of the SSTable.

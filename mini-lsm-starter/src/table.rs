@@ -20,7 +20,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 pub use builder::SsTableBuilder;
 use bytes::Buf;
 pub use iterator::SsTableIterator;
@@ -206,7 +206,16 @@ impl SsTable {
             .map_or(self.block_meta_offset, |x| x.offset);
         let raw_block = self
             .file
-            .read(offset as u64, (offset_end - offset) as u64)?;
+            .read(offset as u64, (offset_end - offset - SIZEOF_U32) as u64)?;
+        let raw_checksum = self
+            .file
+            .read((offset_end - SIZEOF_U32) as u64, SIZEOF_U32 as u64)?;
+        let checksum = (&raw_checksum[..]).get_u32();
+
+        if crc32fast::hash(&raw_block) != checksum {
+            bail!("checksum doesn't match!");
+        }
+
         let block = Block::decode(&raw_block[..]);
         Ok(Arc::new(block))
     }
