@@ -66,6 +66,8 @@ impl BlockMeta {
 
         // TODO(xingyu): improve this by acquiring buffer pool with a calculated size;
         for meta_data in block_meta.iter() {
+            // don't use raw_len here since we would retrieve key based on key_len
+            // the ts field is in next u64 field
             let first_key_len = meta_data.first_key.key_len();
             let last_key_len = meta_data.last_key.key_len();
             buf.put_u32(meta_data.offset as u32);
