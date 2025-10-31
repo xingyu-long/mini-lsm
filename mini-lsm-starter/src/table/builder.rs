@@ -33,8 +33,8 @@ use crate::{
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
-    first_key: Vec<u8>,
-    last_key: Vec<u8>,
+    first_key: KeyVec,
+    last_key: KeyVec,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
@@ -47,8 +47,8 @@ impl SsTableBuilder {
     pub fn new(block_size: usize) -> Self {
         Self {
             builder: BlockBuilder::new(block_size),
-            first_key: Vec::new(),
-            last_key: Vec::new(),
+            first_key: KeyVec::new(),
+            last_key: KeyVec::new(),
             data: Vec::new(),
             meta: Vec::new(),
             block_size: block_size,
@@ -62,13 +62,11 @@ impl SsTableBuilder {
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
         if self.first_key.is_empty() {
-            self.first_key.clear();
-            self.first_key.extend(key.raw_ref());
+            self.first_key.set_from_slice(key);
         }
         if self.builder.add(key, value) {
-            self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
-            self.last_key.clear();
-            self.last_key.extend(key.raw_ref());
+            self.key_hashes.push(farmhash::fingerprint32(key.key_ref()));
+            self.last_key.set_from_slice(key);
             return;
         }
 
@@ -76,12 +74,10 @@ impl SsTableBuilder {
 
         // this is first entry in the new block!
         assert!(self.builder.add(key, value));
-        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
+        self.key_hashes.push(farmhash::fingerprint32(key.key_ref()));
 
-        self.first_key.clear();
-        self.first_key.extend(key.raw_ref());
-        self.last_key.clear();
-        self.last_key.extend(key.raw_ref());
+        self.first_key.set_from_slice(key);
+        self.last_key.set_from_slice(key);
     }
     // finish the current block and use another new build
     //
@@ -99,8 +95,8 @@ impl SsTableBuilder {
         // update the meta data
         self.meta.push(BlockMeta {
             offset: self.data.len(),
-            first_key: KeyVec::from_vec(self.first_key.clone()).into_key_bytes(),
-            last_key: KeyVec::from_vec(self.last_key.clone()).into_key_bytes(),
+            first_key: self.first_key.clone().into_key_bytes(),
+            last_key: self.last_key.clone().into_key_bytes(),
         });
         // calculate the checksum for this block and will be added as put_u32
         let checksum = crc32fast::hash(&encoded);
