@@ -35,10 +35,10 @@ use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
-use crate::key::{KeySlice, TS_RANGE_BEGIN};
+use crate::key::{KeySlice, TS_RANGE_BEGIN, TS_RANGE_END};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
-use crate::mem_table::{MemTable, map_bound};
+use crate::mem_table::{MemTable, map_bound, map_bound_plus_ts};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
@@ -472,7 +472,7 @@ impl LsmStorageInner {
             compaction_controller,
             manifest: Some(manifest),
             options: options.into(),
-            mvcc: None,
+            mvcc: Some(LsmMvccInner::new(0)),
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -593,15 +593,18 @@ impl LsmStorageInner {
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
         let size;
 
+        let _state_lock = self.mvcc().write_lock.lock();
+        let ts = self.mvcc().latest_commit_ts() + 1;
         // use {}, so that we will release the lock once its out of scope.
         {
             // grab the lock for PUT and add it into state
             let guard = self.state.read();
-            guard.memtable.put(_key, _value)?;
+            guard.memtable.put(KeySlice::from_slice(_key, ts), _value)?;
 
             // check if we need to force_freeze_memtable
             size = guard.memtable.approximate_size();
         }
+        self.mvcc().update_commit_ts(ts);
 
         self.try_freeze(size)?;
         Ok(())
@@ -611,13 +614,16 @@ impl LsmStorageInner {
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
         let size;
 
+        let _state_lock = self.mvcc().write_lock.lock();
+        let ts = self.mvcc().latest_commit_ts() + 1;
         {
             let guard = self.state.read();
-            guard.memtable.put(_key, b"")?;
+            guard.memtable.put(KeySlice::from_slice(_key, ts), b"")?;
 
             // check if we need to force_freeze_memtable
             size = guard.memtable.approximate_size();
         }
+        self.mvcc().update_commit_ts(ts);
 
         self.try_freeze(size)?;
         Ok(())
