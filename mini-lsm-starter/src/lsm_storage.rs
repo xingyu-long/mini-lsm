@@ -774,11 +774,18 @@ impl LsmStorageInner {
         };
         let mut mem_iters = Vec::new();
 
-        let mem_iter = snapshot.memtable.scan(_lower, _upper);
+        let mem_iter = snapshot.memtable.scan(
+            map_bound_plus_ts(_lower, TS_RANGE_BEGIN),
+            map_bound_plus_ts(_upper, TS_RANGE_END),
+        );
+
         mem_iters.push(Box::new(mem_iter));
 
         for table in snapshot.imm_memtables.iter() {
-            mem_iters.push(Box::new(table.scan(_lower, _upper)));
+            mem_iters.push(Box::new(table.scan(
+                map_bound_plus_ts(_lower, TS_RANGE_BEGIN),
+                map_bound_plus_ts(_upper, TS_RANGE_END),
+            )));
         }
 
         let mut l0_sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
