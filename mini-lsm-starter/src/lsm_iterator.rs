@@ -39,6 +39,7 @@ pub struct LsmIterator {
     inner: LsmIteratorInner,
     end_bound: Bound<Bytes>,
     is_valid: bool,
+    prev_key: Vec<u8>,
 }
 
 impl LsmIterator {
@@ -47,12 +48,15 @@ impl LsmIterator {
             is_valid: iter.is_valid(),
             inner: iter,
             end_bound: end_bound,
+            prev_key: Vec::new(),
         };
         // skip DELETED values
         // for the case, we had deletions at the beginning
         // and didn't even trigger the next() to call move_to_non_delete.
         // please refer 2nd test within test_task4_integration.
-        iter.move_to_non_delete()?;
+        // iter.move_to_non_delete()?;
+
+        iter.move_to_non_delete_and_skip_same_key()?;
         Ok(iter)
     }
 
@@ -70,10 +74,50 @@ impl LsmIterator {
         Ok(())
     }
 
-    fn move_to_non_delete(&mut self) -> Result<()> {
-        while self.inner.is_valid() && self.inner.value().is_empty() {
-            self.next_inner()?;
+    fn move_to_non_delete_and_skip_same_key(&mut self) -> Result<()> {
+        /*
+        ---------------
+        memtable:
+        1(t8) -> 233333
+        3(t9) -> 233333
+        ---------------
+        imm_memtable:
+        1(t4) -> None
+        2(t5) -> None
+        3(t6) -> 2333
+        4(t7) -> 23333
+        ---------------
+        1(t1) -> 233
+        2(t2) -> 2333
+        3(t3) -> 23333
+
+
+        from heap order (key: ascending, t: descending):
+        1(t8) -> 233333
+        1(t4) -> None
+        1(t1) -> 233
+        2(t5) -> None
+        2(t2) -> 2333
+        3(t9) -> 233333
+        3(t6) -> 2333
+        3(t3) -> 23333
+        4(t7) -> 23333
+
+        */
+        loop {
+            while self.inner.is_valid() && self.inner.key().key_ref() == self.prev_key {
+                self.next_inner()?;
+            }
+            if !self.inner.is_valid() {
+                break;
+            }
+            self.prev_key.clear();
+            self.prev_key.extend(self.inner.key().key_ref());
+            if !self.inner.value().is_empty() {
+                break;
+            }
         }
+
         Ok(())
     }
 }
@@ -95,7 +139,7 @@ impl StorageIterator for LsmIterator {
 
     fn next(&mut self) -> Result<()> {
         self.next_inner()?;
-        self.move_to_non_delete()?;
+        self.move_to_non_delete_and_skip_same_key()?;
         Ok(())
     }
 
