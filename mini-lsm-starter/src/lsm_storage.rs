@@ -586,47 +586,55 @@ impl LsmStorageInner {
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
     pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        unimplemented!()
+        let _state_lock = self.mvcc().write_lock.lock();
+
+        let ts = self.mvcc().latest_commit_ts() + 1;
+        for record in _batch {
+            match record {
+                WriteBatchRecord::Put(key, value) => {
+                    let key = key.as_ref();
+                    let value = value.as_ref();
+                    assert!(!key.is_empty());
+                    assert!(!value.is_empty());
+
+                    let size;
+                    {
+                        let snapshot = self.state.read();
+                        snapshot
+                            .memtable
+                            .put(KeySlice::from_slice(key, ts), value)?;
+                        // check if we need to force_freeze_memtable
+                        size = snapshot.memtable.approximate_size();
+                    }
+                    self.try_freeze(size)?;
+                }
+                WriteBatchRecord::Del(key) => {
+                    let key = key.as_ref();
+                    assert!(!key.is_empty());
+
+                    let size;
+                    {
+                        let snapshot = self.state.read();
+                        snapshot.memtable.put(KeySlice::from_slice(key, ts), b"")?;
+                        // check if we need to force_freeze_memtable
+                        size = snapshot.memtable.approximate_size();
+                    }
+                    self.try_freeze(size)?;
+                }
+            }
+        }
+        self.mvcc().update_commit_ts(ts);
+        Ok(())
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        let size;
-
-        let _state_lock = self.mvcc().write_lock.lock();
-        let ts = self.mvcc().latest_commit_ts() + 1;
-        // use {}, so that we will release the lock once its out of scope.
-        {
-            // grab the lock for PUT and add it into state
-            let guard = self.state.read();
-            guard.memtable.put(KeySlice::from_slice(_key, ts), _value)?;
-
-            // check if we need to force_freeze_memtable
-            size = guard.memtable.approximate_size();
-        }
-        self.mvcc().update_commit_ts(ts);
-
-        self.try_freeze(size)?;
-        Ok(())
+        self.write_batch(&[WriteBatchRecord::Put(_key, _value)])
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        let size;
-
-        let _state_lock = self.mvcc().write_lock.lock();
-        let ts = self.mvcc().latest_commit_ts() + 1;
-        {
-            let guard = self.state.read();
-            guard.memtable.put(KeySlice::from_slice(_key, ts), b"")?;
-
-            // check if we need to force_freeze_memtable
-            size = guard.memtable.approximate_size();
-        }
-        self.mvcc().update_commit_ts(ts);
-
-        self.try_freeze(size)?;
-        Ok(())
+        self.write_batch(&[WriteBatchRecord::Del(_key)])
     }
 
     fn try_freeze(&self, estimated_size: usize) -> Result<()> {
