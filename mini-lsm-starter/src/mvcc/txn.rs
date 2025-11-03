@@ -29,7 +29,7 @@ use ouroboros::self_referencing;
 use parking_lot::Mutex;
 
 use crate::{
-    iterators::{StorageIterator, two_merge_iterator::TwoMergeIterator},
+    iterators::StorageIterator,
     lsm_iterator::{FusedIterator, LsmIterator},
     lsm_storage::LsmStorageInner,
 };
@@ -116,14 +116,11 @@ impl StorageIterator for TxnLocalIterator {
 
 pub struct TxnIterator {
     _txn: Arc<Transaction>,
-    iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
+    iter: FusedIterator<LsmIterator>,
 }
 
 impl TxnIterator {
-    pub fn create(
-        txn: Arc<Transaction>,
-        iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
-    ) -> Result<Self> {
+    pub fn create(txn: Arc<Transaction>, iter: FusedIterator<LsmIterator>) -> Result<Self> {
         Ok(Self {
             _txn: txn,
             iter: iter,
