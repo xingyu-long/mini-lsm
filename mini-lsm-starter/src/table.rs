@@ -81,13 +81,12 @@ impl BlockMeta {
             buf.put_u64(meta_data.last_key.ts());
         }
 
-        // WARN: we shouldn't include the first u32 since it's for number of block_meta
-        let checksum = crc32fast::hash(&buf[original_len + SIZEOF_U32..]);
-        buf.put_u32(checksum);
-
         // add max_ts at the end
         buf.put_u64(max_ts);
 
+        // WARN: we shouldn't include the first u32 since it's for number of block_meta
+        let checksum = crc32fast::hash(&buf[original_len + SIZEOF_U32..]);
+        buf.put_u32(checksum);
     }
 
     /// Decode block meta from a buffer.
@@ -114,11 +113,11 @@ impl BlockMeta {
             });
         }
 
+        let max_ts = buf.get_u64();
         let checksum = buf.get_u32();
         if checksum != crc32fast::hash(raw_block_meta) {
             bail!("checksum doesn't match!");
         }
-        let max_ts = buf.get_u64();
 
         Ok((meta_data_blocks, max_ts))
     }
