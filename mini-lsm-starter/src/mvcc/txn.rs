@@ -124,7 +124,10 @@ impl TxnIterator {
         txn: Arc<Transaction>,
         iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
     ) -> Result<Self> {
-        unimplemented!()
+        Ok(Self {
+            _txn: txn,
+            iter: iter,
+        })
     }
 }
 
@@ -147,7 +150,9 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.iter.next()?;
+
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {
