@@ -40,6 +40,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{MemTable, map_bound, map_bound_plus_ts};
 use crate::mvcc::LsmMvccInner;
+use crate::mvcc::txn::{Transaction, TxnIterator};
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
@@ -271,7 +272,7 @@ impl MiniLsm {
         }))
     }
 
-    pub fn new_txn(&self) -> Result<()> {
+    pub fn new_txn(&self) -> Result<Arc<Transaction>> {
         self.inner.new_txn()
     }
 
@@ -299,11 +300,7 @@ impl MiniLsm {
         self.inner.sync()
     }
 
-    pub fn scan(
-        &self,
-        lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
-    ) -> Result<FusedIterator<LsmIterator>> {
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
         self.inner.scan(lower, upper)
     }
 
@@ -490,8 +487,13 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
+    pub fn get(self: &Arc<Self>, _key: &[u8]) -> Result<Option<Bytes>> {
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+        txn.get(_key)
+    }
+
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
+    pub(crate) fn get_with_ts(&self, _key: &[u8], read_ts: u64) -> Result<Option<Bytes>> {
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
@@ -569,6 +571,7 @@ impl LsmStorageInner {
                 merge_iter_after_l0,
             )?,
             Bound::Unbounded,
+            read_ts,
         )?;
 
         // the iter will skip empty value and always return the valid key, even if the key
@@ -628,12 +631,12 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
+    pub fn put(self: &Arc<Self>, _key: &[u8], _value: &[u8]) -> Result<()> {
         self.write_batch(&[WriteBatchRecord::Put(_key, _value)])
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, _key: &[u8]) -> Result<()> {
+    pub fn delete(self: &Arc<Self>, _key: &[u8]) -> Result<()> {
         self.write_batch(&[WriteBatchRecord::Del(_key)])
     }
 
@@ -771,16 +774,27 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    pub fn new_txn(&self) -> Result<()> {
+    pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
         // no-op
-        Ok(())
+        Ok(self.mvcc().new_txn(self.clone(), self.options.serializable))
+    }
+
+    pub fn scan<'a>(
+        self: &'a Arc<Self>,
+        _lower: Bound<&[u8]>,
+        _upper: Bound<&[u8]>,
+    ) -> Result<TxnIterator> {
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+
+        txn.scan(_lower, _upper)
     }
 
     /// Create an iterator over a range of keys.
-    pub fn scan(
+    pub(crate) fn scan_with_ts(
         &self,
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
+        read_ts: u64,
     ) -> Result<FusedIterator<LsmIterator>> {
         let snapshot = {
             let guard = self.state.read();
@@ -889,6 +903,7 @@ impl LsmStorageInner {
         Ok(FusedIterator::new(LsmIterator::new(
             iter,
             map_bound(_upper),
+            read_ts,
         )?))
     }
 }
