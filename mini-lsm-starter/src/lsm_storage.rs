@@ -848,8 +848,8 @@ impl LsmStorageInner {
                             sstable,
                             KeySlice::from_slice(key, TS_RANGE_BEGIN),
                         )?;
-
-                        if temp_iter.is_valid() && temp_iter.key().key_ref() == key {
+                        // we will have mutliple same keys (with different ts)
+                        while temp_iter.is_valid() && temp_iter.key().key_ref() == key {
                             temp_iter.next()?;
                         }
                         temp_iter
@@ -884,7 +884,8 @@ impl LsmStorageInner {
                         ssts_to_concat,
                         KeySlice::from_slice(key, TS_RANGE_BEGIN),
                     )?;
-                    if temp_iter.is_valid() && temp_iter.key().key_ref() == key {
+                    // we will have mutliple same keys (with different ts)
+                    while temp_iter.is_valid() && temp_iter.key().key_ref() == key {
                         temp_iter.next()?;
                     }
                     temp_iter
