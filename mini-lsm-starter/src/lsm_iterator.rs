@@ -73,8 +73,8 @@ impl LsmIterator {
             return Ok(());
         }
         match &self.end_bound {
-            Bound::Included(value) => self.is_valid = self.inner.key().key_ref() <= value.as_ref(),
-            Bound::Excluded(value) => self.is_valid = self.inner.key().key_ref() < value.as_ref(),
+            Bound::Included(key) => self.is_valid = self.inner.key().key_ref() <= key.as_ref(),
+            Bound::Excluded(key) => self.is_valid = self.inner.key().key_ref() < key.as_ref(),
             Bound::Unbounded => {}
         }
         Ok(())

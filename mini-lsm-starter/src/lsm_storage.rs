@@ -751,7 +751,7 @@ impl LsmStorageInner {
                 .clone();
         }
 
-        // genereate sstables
+        // generate sstables
         let mut builder = SsTableBuilder::new(self.options.block_size);
         flush_memtable.flush(&mut builder)?;
         let sst_id = flush_memtable.id();
