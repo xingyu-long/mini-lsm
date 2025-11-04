@@ -34,15 +34,35 @@ impl Watermark {
         }
     }
 
-    pub fn add_reader(&mut self, ts: u64) {}
+    pub fn add_reader(&mut self, ts: u64) {
+        // ts -> # of snapshots with same ts
+        if let Some(count) = self.readers.get(&ts) {
+            self.readers.insert(ts, *count + 1);
+        } else {
+            self.readers.insert(ts, 1);
+        }
+    }
 
-    pub fn remove_reader(&mut self, ts: u64) {}
+    pub fn remove_reader(&mut self, ts: u64) {
+        if let Some(mut count) = self.readers.get(&ts).copied() {
+            count -= 1;
+            if count == 0 {
+                self.readers.remove(&ts);
+            } else {
+                self.readers.insert(ts, count);
+            }
+        }
+    }
 
     pub fn num_retained_snapshots(&self) -> usize {
         self.readers.len()
     }
 
     pub fn watermark(&self) -> Option<u64> {
-        Some(0)
+        if let Some(entry) = self.readers.first_key_value() {
+            Some(entry.0.clone())
+        } else {
+            None
+        }
     }
 }
