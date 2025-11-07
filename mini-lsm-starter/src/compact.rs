@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use bytes::Bytes;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
@@ -132,13 +133,16 @@ impl LsmStorageInner {
     fn compact_generate_sst_from_iter(
         &self,
         mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
-        _is_lower_level_bottom_level: bool,
+        is_lower_level_bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut new_ssts = Vec::new();
 
         // also need to handle builder
         let mut builder = None;
         let mut last_key = Vec::<u8>::new();
+
+        let watermark = self.mvcc().watermark();
+        let mut first_key_below_watermark = false;
 
         while iter.is_valid() {
             if builder.is_none() {
@@ -153,6 +157,46 @@ impl LsmStorageInner {
             // since the other lower levels might have some invalid values.
             //
             // with MVCC: we would need to keep it since another user may have it with older ts
+
+            /*
+               a@4=del <- above watermark
+               a@3=3   <- latest version below or equal to watermark
+               a@2=2   <- can be removed, no one will read it
+               a@1=1   <- can be removed, no one will read it
+               b@1=1   <- latest version below or equal to watermark
+               c@4=4   <- above watermark
+               d@3=del <- can be removed if compacting to bottom-most level
+               d@2=2   <- can be removed
+            */
+
+
+            // TODO(xingyu): this is smart!!! need to revisit here later
+            if !is_same_key {
+                first_key_below_watermark = true;
+            }
+
+            // handle empty value at bottom level.
+            if is_lower_level_bottom_level
+                && !is_same_key
+                && iter.key().ts() <= watermark
+                && iter.value().is_empty()
+            {
+                last_key.clear();
+                last_key.extend(iter.key().key_ref());
+                iter.next()?;
+                first_key_below_watermark = false;
+                continue;
+            }
+
+            if is_same_key && iter.key().ts() <= watermark {
+                // we deal the case for the first key is less or equal to watermark
+                if !first_key_below_watermark {
+                    iter.next()?;
+                    continue;
+                }
+                first_key_below_watermark = false;
+            }
+
             builder_inner.add(iter.key(), iter.value());
 
             // Q: Do I need to do control how many ssts we should have here?
