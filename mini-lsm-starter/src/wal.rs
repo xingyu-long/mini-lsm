@@ -22,7 +22,6 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::block::SIZEOF_U16;
 use crate::key::{KeyBytes, KeySlice};
 
 pub struct Wal {
@@ -56,57 +55,77 @@ impl Wal {
         let mut rbuf = buf.as_slice();
         while rbuf.has_remaining() {
             let mut checksum_buf = Vec::new();
-            let key_len = rbuf.get_u16() as usize;
-            let key = Bytes::copy_from_slice(&rbuf[..key_len]);
-            rbuf.advance(key_len);
-            let ts = rbuf.get_u64();
+            let batch_size = rbuf.get_u32() as usize;
+            let mut body_rbuf = &rbuf[..batch_size];
+            checksum_buf.extend(body_rbuf);
+            let mut entries = Vec::new();
 
-            checksum_buf.put_u16(key_len as u16);
-            checksum_buf.put(&key[..]);
-            checksum_buf.put_u64(ts);
+            while body_rbuf.has_remaining() {
+                let key_len = body_rbuf.get_u16() as usize;
+                let key = Bytes::copy_from_slice(&body_rbuf[..key_len]);
+                body_rbuf.advance(key_len);
+                let ts = body_rbuf.get_u64();
 
-            let value_len = rbuf.get_u16() as usize;
-            let value = Bytes::copy_from_slice(&rbuf[..value_len]);
-            rbuf.advance(value_len);
-            checksum_buf.put_u16(value_len as u16);
-            checksum_buf.put(&value[..]);
+                let value_len = body_rbuf.get_u16() as usize;
+                let value = Bytes::copy_from_slice(&body_rbuf[..value_len]);
+                body_rbuf.advance(value_len);
+
+                entries.push((KeyBytes::from_bytes_with_ts(key, ts), value));
+            }
+            rbuf.advance(batch_size);
 
             let checksum = rbuf.get_u32();
             if checksum != crc32fast::hash(&checksum_buf) {
                 bail!("checksum doesn't match!");
             }
 
-            _skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
+            // insert everything from entries to _skiplist since it passed checksum check
+            for entry in entries {
+                _skiplist.insert(entry.0, entry.1);
+            }
         }
         Ok(Self {
             file: Arc::new(Mutex::new(BufWriter::new(file))),
         })
     }
 
+    // week 2, day 6
     // | key_len (exclude ts len) (u16) | key | ts (u64) | value_len (u16) | value | checksum (u32) |
     pub fn put(&self, _key: KeySlice, _value: &[u8]) -> Result<()> {
+        self.put_batch(&[(_key, _value)])
+    }
+
+    /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
+    // week 3, day 5: Atomic WAL
+    // |   HEADER   |                          BODY                                      |  FOOTER  |
+    // |     u32    |   u16   | var | u64 |    u16    |  var  |           ...            |    u32   |
+    // | batch_size | key_len | key | ts  | value_len | value | more key-value pairs ... | checksum |
+    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
         let mut file = self.file.lock();
-        let mut buf: Vec<u8> = Vec::with_capacity(SIZEOF_U16 * 2 + _key.raw_len() + _value.len());
-        buf.put_u16(_key.key_len() as u16);
-        buf.put(_key.key_ref());
-        buf.put_u64(_key.ts());
-
-        buf.put_u16(_value.len() as u16);
-        buf.put(_value);
-
-        // add checksum here
-        let checksum = crc32fast::hash(&buf);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut body_buf: Vec<u8> = Vec::new();
+        // prepare body
+        for (key, value) in _data {
+            // key
+            body_buf.put_u16(key.key_len() as u16);
+            body_buf.put(key.key_ref());
+            body_buf.put_u64(key.ts());
+            // value
+            body_buf.put_u16(value.len() as u16);
+            body_buf.put(*value);
+        }
+        let checksum = crc32fast::hash(&body_buf);
+        // header
+        buf.put_u32(body_buf.len() as u32);
+        // body
+        buf.extend(body_buf);
+        // footer
         buf.put_u32(checksum);
 
         file.write_all(&buf)?;
         file.flush().unwrap();
 
         Ok(())
-    }
-
-    /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
     }
 
     pub fn sync(&self) -> Result<()> {
