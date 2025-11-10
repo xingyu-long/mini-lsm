@@ -598,8 +598,34 @@ impl LsmStorageInner {
         Ok(None)
     }
 
+    /// Write a batch of data into the storage and return ts for txn to commit
+    pub fn write_batch<T: AsRef<[u8]>>(
+        self: &Arc<Self>,
+        _batch: &[WriteBatchRecord<T>],
+    ) -> Result<()> {
+        if self.options.serializable {
+            // create batch through txn APIs
+            let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+            for record in _batch {
+                match record {
+                    WriteBatchRecord::Put(key, value) => {
+                        txn.put(key.as_ref(), value.as_ref());
+                    }
+                    WriteBatchRecord::Del(key) => {
+                        txn.delete(key.as_ref());
+                    }
+                }
+            }
+            txn.commit()?;
+        } else {
+            // regular APIs
+            self.write_batch_inner(_batch)?;
+        }
+        Ok(())
+    }
+
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
+    pub fn write_batch_inner<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<u64> {
         let _state_lock = self.mvcc().write_lock.lock();
 
         let ts = self.mvcc().latest_commit_ts() + 1;
@@ -638,7 +664,7 @@ impl LsmStorageInner {
             }
         }
         self.mvcc().update_commit_ts(ts);
-        Ok(())
+        Ok(ts)
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.

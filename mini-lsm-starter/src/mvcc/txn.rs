@@ -24,7 +24,7 @@ use std::{
     },
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use crossbeam_skiplist::map::Entry;
@@ -36,6 +36,7 @@ use crate::{
     lsm_iterator::{FusedIterator, LsmIterator},
     lsm_storage::{LsmStorageInner, WriteBatchRecord},
     mem_table::map_bound,
+    mvcc::CommittedTxnData,
 };
 
 pub struct Transaction {
@@ -51,6 +52,11 @@ impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if self.committed.load(Ordering::SeqCst) {
             panic!("already committed!");
+        }
+        // add hash(key) into the read set
+        if let Some(write_read_set) = &self.key_hashes {
+            let mut guard = write_read_set.lock();
+            guard.1.insert(farmhash::hash32(key));
         }
         // check the local_storage first
         if let Some(entry) = self.local_storage.get(key) {
@@ -93,6 +99,11 @@ impl Transaction {
         if self.committed.load(Ordering::SeqCst) {
             panic!("already committed!");
         }
+        // add hash(key) into the write set
+        if let Some(write_read_set) = &self.key_hashes {
+            let mut guard = write_read_set.lock();
+            guard.0.insert(farmhash::hash32(key));
+        }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
@@ -100,6 +111,11 @@ impl Transaction {
     pub fn delete(&self, key: &[u8]) {
         if self.committed.load(Ordering::SeqCst) {
             panic!("already committed!");
+        }
+        // add hash(key) into the write set
+        if let Some(write_read_set) = &self.key_hashes {
+            let mut guard = write_read_set.lock();
+            guard.0.insert(farmhash::hash32(key));
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::from_static(b""));
@@ -109,19 +125,66 @@ impl Transaction {
         self.committed
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .expect("cannot operate on committed txn!");
-        // critical section
-        let mut records = Vec::new();
-        for entry in self.local_storage.iter() {
-            if entry.value().is_empty() {
-                records.push(WriteBatchRecord::Del(entry.key().clone()));
-            } else {
-                records.push(WriteBatchRecord::Put(
-                    entry.key().clone(),
-                    entry.value().clone(),
-                ));
+
+        let _commit_lock = self.inner.mvcc().commit_lock.lock();
+        let serializable;
+
+        if let Some(guard) = &self.key_hashes {
+            let guard = guard.lock();
+            let (write_set, read_set) = &*guard;
+            println!(
+                "commit txn: write_set: {:?}, read_set: {:?}",
+                write_set, read_set
+            );
+            if !write_set.is_empty() {
+                let committed_txns = self.inner.mvcc().committed_txns.lock();
+                for (_, txn_data) in committed_txns.range((self.read_ts + 1)..) {
+                    for key_hash in read_set {
+                        // this key_hashes have write set from committed txn.
+                        if txn_data.key_hashes.contains(key_hash) {
+                            bail!("serializable check failed");
+                        }
+                    }
+                }
             }
+            serializable = true;
+        } else {
+            serializable = false;
         }
-        self.inner.write_batch(&records)?;
+
+        if serializable {
+            // critical section
+            let mut records = Vec::new();
+            for entry in self.local_storage.iter() {
+                if entry.value().is_empty() {
+                    records.push(WriteBatchRecord::Del(entry.key().clone()));
+                } else {
+                    records.push(WriteBatchRecord::Put(
+                        entry.key().clone(),
+                        entry.value().clone(),
+                    ));
+                }
+            }
+            let ts = self.inner.write_batch_inner(&records)?;
+
+            // add this txn into committed_txns
+            let mut committed_txns = self.inner.mvcc().committed_txns.lock();
+            let mut key_hashes = self.key_hashes.as_ref().unwrap().lock();
+            let (write_set, _) = &mut *key_hashes;
+
+            let old_data = committed_txns.insert(
+                ts,
+                CommittedTxnData {
+                    // use write_set for committed data and reset this as empty too.
+                    key_hashes: std::mem::take(write_set),
+                    read_ts: self.read_ts,
+                    commit_ts: ts,
+                },
+            );
+
+            // ensure this is no same committed ts entry
+            assert!(old_data.is_none());
+        }
         Ok(())
     }
 }
