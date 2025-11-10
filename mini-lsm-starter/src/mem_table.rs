@@ -195,24 +195,28 @@ impl MemTable {
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
     pub fn put(&self, _key: KeySlice, _value: &[u8]) -> Result<()> {
-        if let Some(wal) = &self.wal {
-            wal.put(_key, _value)?;
-        }
-
-        let size = _key.raw_len() + _value.len();
-        self.map.insert(
-            _key.to_key_vec().into_key_bytes(),
-            Bytes::copy_from_slice(_value),
-        );
-
-        self.approximate_size
-            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        self.put_batch(&[(_key, _value)])
     }
 
     /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
     pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+        if let Some(wal) = &self.wal {
+            wal.put_batch(_data)?;
+        }
+
+        let mut size = 0;
+        for (key, value) in _data {
+            size += key.raw_len() + value.len();
+            self.map.insert(
+                key.to_key_vec().into_key_bytes(),
+                Bytes::copy_from_slice(value),
+            );
+        }
+
+        self.approximate_size
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(())
     }
 
     pub fn sync_wal(&self) -> Result<()> {
