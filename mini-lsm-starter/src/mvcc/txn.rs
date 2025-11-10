@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 use crate::{
     iterators::{StorageIterator, two_merge_iterator::TwoMergeIterator},
     lsm_iterator::{FusedIterator, LsmIterator},
-    lsm_storage::LsmStorageInner,
+    lsm_storage::{LsmStorageInner, WriteBatchRecord},
     mem_table::map_bound,
 };
 
@@ -46,6 +46,9 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        if self.committed.load(std::sync::atomic::Ordering::Relaxed) {
+            panic!("already committed!");
+        }
         // check the local_storage first
         if let Some(entry) = self.local_storage.get(key) {
             if entry.value().is_empty() {
@@ -59,6 +62,9 @@ impl Transaction {
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
+        if self.committed.load(std::sync::atomic::Ordering::Relaxed) {
+            panic!("already committed!");
+        }
         // get the TxnLocalIterator from local_storage
         let lower_bytes = map_bound(lower);
         let upper_bytes = map_bound(upper);
@@ -81,17 +87,40 @@ impl Transaction {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
+        if self.committed.load(std::sync::atomic::Ordering::Relaxed) {
+            panic!("already committed!");
+        }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
 
     pub fn delete(&self, key: &[u8]) {
+        if self.committed.load(std::sync::atomic::Ordering::Relaxed) {
+            panic!("already committed!");
+        }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::from_static(b""));
     }
 
     pub fn commit(&self) -> Result<()> {
-        unimplemented!()
+        if !self.committed.load(std::sync::atomic::Ordering::Relaxed) {
+            self.committed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // critical section
+            let mut records = Vec::new();
+            for entry in self.local_storage.iter() {
+                if entry.value().is_empty() {
+                    records.push(WriteBatchRecord::Del(entry.key().clone()));
+                } else {
+                    records.push(WriteBatchRecord::Put(
+                        entry.key().clone(),
+                        entry.value().clone(),
+                    ));
+                }
+            }
+            self.inner.write_batch(&records)?;
+        }
+        Ok(())
     }
 }
 
