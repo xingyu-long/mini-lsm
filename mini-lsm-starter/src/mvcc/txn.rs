@@ -140,7 +140,8 @@ impl Transaction {
                 let committed_txns = self.inner.mvcc().committed_txns.lock();
                 for (_, txn_data) in committed_txns.range((self.read_ts + 1)..) {
                     for key_hash in read_set {
-                        // this key_hashes have write set from committed txn.
+                        // check if the read set of current txn overlaps with committed txns' write set
+                        // this is to prevent write skew
                         if txn_data.key_hashes.contains(key_hash) {
                             bail!("serializable check failed");
                         }
@@ -252,7 +253,7 @@ impl StorageIterator for TxnLocalIterator {
 }
 
 pub struct TxnIterator {
-    _txn: Arc<Transaction>,
+    txn: Arc<Transaction>,
     iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
 }
 
@@ -261,16 +262,29 @@ impl TxnIterator {
         txn: Arc<Transaction>,
         iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
     ) -> Result<Self> {
-        Ok(Self {
-            _txn: txn,
-            iter: iter,
-        })
+        let mut iter = Self { txn, iter: iter };
+        iter.move_to_non_delete()?;
+        if iter.is_valid() {
+            iter.add_to_read_set()?;
+        }
+
+        Ok(iter)
     }
 
     fn move_to_non_delete(&mut self) -> Result<()> {
         while self.iter.is_valid() && self.iter.value().is_empty() {
             self.iter.next()?;
         }
+        Ok(())
+    }
+
+    fn add_to_read_set(&mut self) -> Result<()> {
+        // record the valid entry to read set for scan.
+        if let Some(guard) = &self.txn.key_hashes {
+            let mut guard = guard.lock();
+            guard.1.insert(farmhash::hash32(self.iter.key().as_ref()));
+        }
+
         Ok(())
     }
 }
@@ -296,6 +310,9 @@ impl StorageIterator for TxnIterator {
     fn next(&mut self) -> Result<()> {
         self.iter.next()?;
         self.move_to_non_delete()?;
+        if self.is_valid() {
+            self.add_to_read_set()?;
+        }
 
         Ok(())
     }
