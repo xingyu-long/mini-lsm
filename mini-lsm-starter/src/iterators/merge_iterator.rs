@@ -51,13 +51,16 @@ impl<I: StorageIterator> Ord for HeapWrapper<I> {
 /// Merge multiple iterators of the same type. If the same key occurs multiple times in some
 /// iterators, prefer the one with smaller index.
 pub struct MergeIterator<I: StorageIterator> {
+    // the BinaryHeap by default is the max heap and use reverse above to make it as min heap.
     iters: BinaryHeap<HeapWrapper<I>>,
     current: Option<HeapWrapper<I>>,
 }
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        if iters.is_empty() {
+        // 1. if there are no iters
+        // 2. if all iters are invalid
+        if iters.is_empty() || iters.iter().all(|x| !x.is_valid()) {
             return Self {
                 iters: BinaryHeap::new(),
                 current: None,
@@ -65,15 +68,6 @@ impl<I: StorageIterator> MergeIterator<I> {
         }
 
         let mut heap = BinaryHeap::new();
-
-        // TODO(xingyu): what if all iters are invalid.
-        if iters.iter().all(|x| !x.is_valid()) {
-            let mut iters = iters;
-            return Self {
-                iters: heap,
-                current: Some(HeapWrapper(0, iters.pop().unwrap())),
-            };
-        }
 
         for (idx, iter) in iters.into_iter().enumerate() {
             if iter.is_valid() {
@@ -115,11 +109,14 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
         // remove the stale entries which share the same KEY.
         let current = self.current.as_mut().unwrap();
         while let Some(mut inner_iter) = self.iters.peek_mut() {
-            // this will move the iter to next element which is the not same as KEY.
+            // skip SAME key across all iters.
             if inner_iter.1.key() == current.1.key() {
-                if let e @ Err(_) = inner_iter.1.next() {
-                    PeekMut::pop(inner_iter);
-                    return e;
+                match inner_iter.1.next() {
+                    Err(e) => {
+                        PeekMut::pop(inner_iter);
+                        return Err(e);
+                    }
+                    Ok(_) => {}
                 }
 
                 if !inner_iter.1.is_valid() {
@@ -141,13 +138,14 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
             return Ok(());
         }
 
-        // handle the case, where the another iter has a smaller key.
-        // just use `if`, bc we just need to check with the top of HEAP
+        // for the case, like `test_task2_merge_1`, we may have the case
+        // current = e and forgot the key = d from the iters. which will
+        // cause the incorrect order.
         if let Some(mut inner_iter) = self.iters.peek_mut() {
-            // this means inner_iter will be pop out ealier than the current,
-            // we would swap it since it's a next smaller key.
-            if *inner_iter > *current {
-                std::mem::swap(&mut *inner_iter, current);
+            // the order was the opposite since we have the reverse.
+            if *current < *inner_iter {
+                // we should make the smaller key as current
+                std::mem::swap(current, &mut inner_iter);
             }
         }
 
